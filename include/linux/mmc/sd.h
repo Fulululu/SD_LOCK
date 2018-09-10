@@ -96,8 +96,19 @@
  */
 #define SD_LOCK_STATUS_SHIFT    25
 #define SD_GET_LOCK_STATUS(x)   ((x >> SD_LOCK_STATUS_SHIFT) & 1)
+
 #define SD_LOCKED	    1
 #define SD_UNLOCKED 	0
+
+#define SD_INIT_FAILED  0
+#define SD_INIT_SUCCESS 1
+
+#define SD_UNLOCK_ONLY  0
+#define SD_CLEAR_PWD    1
+#define SD_FORCE_ERASE  2
+
+
 extern struct mmc_pwd g_st_mmc_pwd;
+extern struct mmc_pwd g_st_tmp_pwd;
 
 #endif /* LINUX_MMC_SD_H */

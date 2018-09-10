@@ -17,6 +17,7 @@
 #include <linux/mmc/host.h>
 #include <linux/mmc/card.h>
 #include <linux/mmc/mmc.h>
+#include <linux/mmc/sd.h>
 
 #include "core.h"
 #include "mmc_ops.h"
@@ -24,19 +25,18 @@
 
 
 struct mmc_pwd g_st_mmc_pwd = {0, NULL};
-//extern struct himci_host *g_hi_host;
+struct mmc_pwd g_st_tmp_pwd = {0, NULL};
 
-static u32 mmc_send_cmd42(struct mmc_host *host, struct mmc_card *card, u8 cmd_data[])
+static u32 mmc_send_cmd42(struct mmc_host *host, struct mmc_card *card, u8 *cmd_data, u32 *response)
 {
     struct mmc_request mrq = {NULL};
     struct mmc_command cmd = {0};
     struct mmc_data data = {0};
     struct scatterlist sg;
-    
+
     // 设置CMD42 Block长度
 	cmd.opcode = MMC_SET_BLOCKLEN;
-	cmd.arg = sizeof(cmd_data);
-    printk("====== cmd_data[]=%s, sizeof(cmd_data)=%d ,strlen(cmd_data)=%d ======\n",cmd_data,cmd.arg,strlen(cmd_data));
+	cmd.arg = 512;
 	cmd.flags = MMC_RSP_R1 | MMC_CMD_AC;
 	mmc_wait_for_cmd(host, &cmd, 0);
 	if (cmd.error)
@@ -44,7 +44,6 @@ static u32 mmc_send_cmd42(struct mmc_host *host, struct mmc_card *card, u8 cmd_d
         printk(KERN_INFO "\033[40;32m SET_BLOCKLEN for CMD42 error(0x%x)! return 0x%x \033[0m\n",cmd.error, cmd.resp[0]);
 		return cmd.error;    
 	}
-    //printk(KERN_INFO "\033[40;32m SET_BLOCKLEN for CMD42 success! \033[0m\n");
     
     // 填充结构体
     mrq.cmd = &cmd;
@@ -54,17 +53,29 @@ static u32 mmc_send_cmd42(struct mmc_host *host, struct mmc_card *card, u8 cmd_d
     cmd.arg = 0;
     cmd.flags = MMC_RSP_R1B | MMC_CMD_ADTC;
 
-    data.blksz = sizeof(cmd_data);
+    data.blksz = 512;
     data.blocks = 1;
     data.flags = MMC_DATA_WRITE;
     data.sg = &sg;
     data.sg_len = 1;
-    data.timeout_ns = 0;
-    data.timeout_clks = 64;
 
-    sg_init_one(&sg, cmd_data, sizeof(cmd_data));
-
-    
+    sg_init_one(&sg, cmd_data, 512);
+#if 0    
+    /* data.flags must already be set before doing this. */
+	mmc_set_data_timeout(&data, card);
+    if ((cmd.flags & MMC_RSP_R1B) == MMC_RSP_R1B) {
+			/*
+			 * Pretend this is a data transfer and rely on the
+			 * host driver to compute timeout.  When all host
+			 * drivers support cmd.cmd_timeout for R1B, this
+			 * can be changed to:
+			 *
+			 *     mrq.data = NULL;
+			 *     cmd.cmd_timeout = idata->ic.cmd_timeout_ms;
+			 */
+			data.timeout_ns = cmd.cmd_timeout_ms * 1000000;
+		}
+#endif    
     // 发送命令请求
     mmc_wait_for_req(host, &mrq);
     if (cmd.error)
@@ -75,118 +86,205 @@ static u32 mmc_send_cmd42(struct mmc_host *host, struct mmc_card *card, u8 cmd_d
     {
         return data.error;
     }
+    *response = cmd.resp[0];
 
     return 0;
 }
 
-static u8 cmd42_data[34];
-int _mmc_lock_card(struct mmc_host *host, struct mmc_card *card)
+int _mmc_card_set_pwd(struct mmc_host *host, struct mmc_card *card, struct mmc_pwd *pst_mmc_pwd)
 {
     u32 err = -1;
-    u8 *ptmp;
-    
-    /* lock card without COP */
-    cmd42_data[0] = 0x04;
-    cmd42_data[1] = g_st_mmc_pwd.len;
-    if (g_st_mmc_pwd.len != 0 || g_st_mmc_pwd.ppwd != NULL)
-    {
-        memcpy(cmd42_data+2, g_st_mmc_pwd.ppwd, g_st_mmc_pwd.len);
-    }
-    else
-    {
-        return err;
-    }
-    //printk(KERN_INFO "_mmc_lock_card(): len(pwd)=%d, pwd=%s\n",g_st_mmc_pwd.len,g_st_mmc_pwd.ppwd);
+    u8 *tmp_ptr;
+    u32 response;
 
-    ptmp = (u8 *)kmalloc(g_st_mmc_pwd.len + 2, GFP_KERNEL);
-    if (ptmp == NULL)
+    tmp_ptr = (u8 *)kmalloc(512, GFP_KERNEL);
+    if (NULL == tmp_ptr)
     {
         return err;
     }
-    memcpy(ptmp, cmd42_data, g_st_mmc_pwd.len + 2);
-    ptmp[g_st_mmc_pwd.len + 2] = '\0';
+
+    tmp_ptr[0] = 0x01;
+    tmp_ptr[1] = pst_mmc_pwd->len;
+    memcpy(tmp_ptr+2, &pst_mmc_pwd->ppwd, pst_mmc_pwd->len);
+    tmp_ptr[pst_mmc_pwd->len + 2] = '\0';
  
     mmc_claim_host(card->host);
-    err = mmc_send_cmd42(host, card, ptmp);
+    err = mmc_send_cmd42(host, card, tmp_ptr, &response);
     mmc_release_host(card->host);
-    kfree(ptmp);   
+    kfree(tmp_ptr);   
 
+    if (response & MMC_LOCK_MASK)
+    {
+        return response;
+    }
     return err;
 }
 
-int _mmc_unlock_card(struct mmc_host *host, struct mmc_card *card)
+int _mmc_card_clr_pwd(struct mmc_host *host, struct mmc_card *card, struct mmc_pwd *pst_mmc_pwd)
 {
     u32 err = -1;
-    int i;
-    u8 *ptmp;
-    /* unlock card without COP */
-    cmd42_data[0] = 0;
-    cmd42_data[1] = g_st_mmc_pwd.len;
+    u8 *tmp_ptr;
+    u32 response;
 
-    if (g_st_mmc_pwd.len != 0 || g_st_mmc_pwd.ppwd != NULL)
-    {
-        memcpy(cmd42_data+2, g_st_mmc_pwd.ppwd, g_st_mmc_pwd.len);
-    }
-    else
+    tmp_ptr = (u8 *)kmalloc(512, GFP_KERNEL);
+    if (NULL == tmp_ptr)
     {
         return err;
     }
-    //printk(KERN_INFO "_mmc_unlock_card(): g_st_mmc_pwd:len(pwd)=%d, pwd=%s\n",g_st_mmc_pwd.len,g_st_mmc_pwd.ppwd);
-    
-    ptmp = (u8 *)kmalloc(g_st_mmc_pwd.len + 2, GFP_KERNEL);
-    if (ptmp == NULL)
-    {
-        return err;
-    }
-    memcpy(ptmp, cmd42_data, g_st_mmc_pwd.len + 2);
-    ptmp[g_st_mmc_pwd.len + 2] = '\0';
-    
-    // Unlock Card by using pwd
-    //printk("====== g_init_card=%d ======\n",g_init_card);
+
+    tmp_ptr[0] = 0x02;
+    tmp_ptr[1] = pst_mmc_pwd->len;
+    memcpy(tmp_ptr+2, &pst_mmc_pwd->ppwd, pst_mmc_pwd->len);
+    tmp_ptr[pst_mmc_pwd->len + 2] = '\0';
+
     if(g_init_card)
     {
         mmc_claim_host(card->host);
-        //printk(KERN_INFO "_mmc_unlock_card(): ptmp:len(pwd)=%d, pwd=%s\n",strlen(ptmp),ptmp);
-        err = mmc_send_cmd42(host, card, ptmp);
+        err = mmc_send_cmd42(host, card, tmp_ptr, &response);
         mmc_release_host(card->host);
     }
     else
     {
-        err = mmc_send_cmd42(host, card, ptmp);
+        err = mmc_send_cmd42(host, card, tmp_ptr, &response);
     }
-    kfree(ptmp);
+    kfree(tmp_ptr);   
 
+    if (response & MMC_LOCK_MASK)
+    {
+        return response;
+    }
     return err;
 }
 
-static int mmc_set_pwd(struct    mmc_pwd *pst_mmc_pwd)
+int _mmc_lock_card(struct mmc_host *host, struct mmc_card *card, struct mmc_pwd *pst_mmc_pwd)
 {
-    static int pwdinit = 0;
-    
-    if (pst_mmc_pwd->len != 0 && pst_mmc_pwd->ppwd != NULL)
+    u32 err = -1;
+    u8 *tmp_ptr;
+    u32 response;
+
+    tmp_ptr = (u8 *)kmalloc(512, GFP_KERNEL);
+    if (NULL == tmp_ptr)
     {
-        if (!pwdinit)
+        return err;
+    }
+
+    tmp_ptr[0] = 0x04;
+    tmp_ptr[1] = pst_mmc_pwd->len;
+    memcpy(tmp_ptr+2, &pst_mmc_pwd->ppwd, pst_mmc_pwd->len);
+    tmp_ptr[pst_mmc_pwd->len + 2] = '\0';
+
+    mmc_claim_host(card->host);
+    err = mmc_send_cmd42(host, card, tmp_ptr, &response);
+    mmc_release_host(card->host);
+    
+    kfree(tmp_ptr);   
+
+    if (response & MMC_LOCK_MASK)
+    {
+        return response;
+    }
+    return err;
+}
+
+int _mmc_unlock_card(struct mmc_host *host, struct mmc_card *card, struct mmc_pwd *pst_mmc_pwd)
+{
+    u32 err = -1;
+    u8 *tmp_ptr;
+    u32 response;
+
+    tmp_ptr = (u8 *)kmalloc(512, GFP_KERNEL);
+    if (NULL == tmp_ptr)
+    {
+        return err;
+    }
+
+    tmp_ptr[0] = 0x00;
+    tmp_ptr[1] = pst_mmc_pwd->len;
+    memcpy(tmp_ptr+2, &pst_mmc_pwd->ppwd, pst_mmc_pwd->len);
+    tmp_ptr[pst_mmc_pwd->len + 2] = '\0';
+
+    if(g_init_card)
+    {
+        printk("====== _mmc_unlock_card():host=%d card=%d ======\n",host!=NULL?1:0,card!=NULL?1:0);
+        mmc_claim_host(card->host);
+        err = mmc_send_cmd42(host, card, tmp_ptr, &response);
+        mmc_release_host(card->host);
+    }
+    else
+    {
+        err = mmc_send_cmd42(host, card, tmp_ptr, &response);
+    }
+    kfree(tmp_ptr);
+
+    if (response & MMC_LOCK_MASK)
+    {
+        return response;
+    }
+    return err;
+}
+
+int _mmc_card_fe(struct mmc_host *host, struct mmc_card *card)
+{
+    u32 err = -1;
+    u8 *tmp_ptr;
+    u32 response;
+
+    tmp_ptr = (u8 *)kmalloc(512, GFP_KERNEL);
+    if (NULL == tmp_ptr)
+    {
+        return err;
+    }
+    
+    tmp_ptr[0] = 0x08;
+    tmp_ptr[1] = '\0';
+
+    if(g_init_card)
+    {
+        mmc_claim_host(card->host);
+        err = mmc_send_cmd42(host, card, tmp_ptr, &response);
+        mmc_release_host(card->host);
+    }
+    else
+    {
+        err = mmc_send_cmd42(host, card, tmp_ptr, &response);
+    }
+    kfree(tmp_ptr);   
+
+    if (response & MMC_LOCK_MASK)
+    {
+        return response;
+    }
+    return err;
+}
+
+int mmc_save_pwd(struct    mmc_pwd *pdest_mmc_pwd, struct mmc_pwd *psrc_mmc_pwd)
+{
+    static int pwd_init = 0;
+
+    if (psrc_mmc_pwd->len != 0 && psrc_mmc_pwd->ppwd != NULL)
+    {
+        if (!pwd_init)
         {
-            g_st_mmc_pwd.ppwd = (char *)kmalloc(pst_mmc_pwd->len * sizeof(char), GFP_KERNEL);
-            if (g_st_mmc_pwd.ppwd == NULL)
+            pdest_mmc_pwd->ppwd = (char *)kmalloc(psrc_mmc_pwd->len * sizeof(char), GFP_KERNEL);
+            if (NULL == pdest_mmc_pwd->ppwd)
             {
                 return -1;
             }
-            pwdinit = 1;
+            pwd_init = 1;
         }
         else
         {
-            kfree(g_st_mmc_pwd.ppwd);
+            kfree(pdest_mmc_pwd->ppwd);
+            pdest_mmc_pwd->ppwd = (char *)kmalloc(psrc_mmc_pwd->len * sizeof(char), GFP_KERNEL);
+            if (NULL == pdest_mmc_pwd->ppwd)
+            {
+                return -1;
+            }
         }
-
-        g_st_mmc_pwd.len = pst_mmc_pwd->len;
-        g_st_mmc_pwd.ppwd = (char *)kmalloc(pst_mmc_pwd->len * sizeof(char), GFP_KERNEL);
-        if (g_st_mmc_pwd.ppwd == NULL)
-        {
-            return -1;
-        }
-        memcpy(g_st_mmc_pwd.ppwd, pst_mmc_pwd->ppwd, pst_mmc_pwd->len);
-        g_st_mmc_pwd.ppwd[pst_mmc_pwd->len] = '\0';
+        
+        pdest_mmc_pwd->len = psrc_mmc_pwd->len;
+        pdest_mmc_pwd->ppwd = psrc_mmc_pwd->ppwd;
+        pdest_mmc_pwd->ppwd[pdest_mmc_pwd->len] = '\0';
         return 0;
     }
     else
@@ -195,86 +293,58 @@ static int mmc_set_pwd(struct    mmc_pwd *pst_mmc_pwd)
     }
 }
 
-int mmc_lock_card(struct    mmc_pwd *pst_mmc_pwd)
+static int mmc_save_tmp(struct    mmc_pwd *pdest_mmc_pwd, struct mmc_pwd *psrc_mmc_pwd)
+{
+    static int pwd_tmp_init = 0;
+
+    if (psrc_mmc_pwd->len != 0 && psrc_mmc_pwd->ppwd != NULL)
+    {
+        if (!pwd_tmp_init)
+        {
+            pdest_mmc_pwd->ppwd = (char *)kmalloc(psrc_mmc_pwd->len * sizeof(char), GFP_KERNEL);
+            if (NULL == pdest_mmc_pwd->ppwd)
+            {
+                return -1;
+            }
+            pwd_tmp_init = 1;
+        }
+        else
+        {
+            kfree(pdest_mmc_pwd->ppwd);
+            pdest_mmc_pwd->ppwd = (char *)kmalloc(psrc_mmc_pwd->len * sizeof(char), GFP_KERNEL);
+            if (NULL == pdest_mmc_pwd->ppwd)
+            {
+                return -1;
+            }
+        }
+        
+        pdest_mmc_pwd->len = psrc_mmc_pwd->len;
+        pdest_mmc_pwd->ppwd = psrc_mmc_pwd->ppwd;
+        pdest_mmc_pwd->ppwd[pdest_mmc_pwd->len] = '\0';
+        return 0;
+    }
+    else
+    {
+        return -1;
+    }
+}
+
+int mmc_card_set_pwd(struct      mmc_pwd *pst_mmc_pwd)
 {
     int err;
-    
-    user_lock_status = MMC_LOCKED;
-    g_pwd_fail = 0;
-    err = mmc_set_pwd(pst_mmc_pwd);
+
+    err = _mmc_card_set_pwd(g_hi_host->mmc, g_hi_host->mmc->card, pst_mmc_pwd);
+    if(err)
+    {   
+        return err;
+    }
+
+    err = mmc_save_pwd(&g_st_mmc_pwd, pst_mmc_pwd);
     if (err)
     {
         return err;
     }
-    //printk(KERN_INFO "mmc_lock_card(): len(pwd)=%d, pwd=%s",g_st_mmc_pwd.len,g_st_mmc_pwd.ppwd);
-    //printk("====== LLLLLock host:[0x%x] ======== \n", (unsigned int)g_hi_host->mmc);
-
-    err = _mmc_lock_card(g_hi_host->mmc, g_hi_host->mmc->card);
-    if(!err)
-    {
-        printk(KERN_INFO "\033[40;32mCard is locked\033[0m\n");
-        card_lock_status = CARD_LOCKED;
-        return err;
-    }
-    return err;
-}
-EXPORT_SYMBOL(mmc_lock_card);
-
-int mmc_unlock_card(struct      mmc_pwd *pst_mmc_pwd)
-{
-    int err;
-
-    user_lock_status = MMC_UNLOCKED;
-    err = mmc_set_pwd(pst_mmc_pwd);
-    //printk(KERN_INFO "mmc_unlock_card(): len(pwd)=%d, pwd=%s, g_init_card=%d\n",g_st_mmc_pwd.len,g_st_mmc_pwd.ppwd,g_init_card);
-    if (g_init_card)
-    {
-        err = _mmc_unlock_card(g_hi_host->mmc, g_hi_host->mmc->card);
-        if(!err)
-        {
-            printk(KERN_INFO "\033[40;32mPassword unlock success, card is unlocked \033[0m\n");
-            card_lock_status = CARD_UNLOCKED;
-        }
-        return err;
-    }
-    else
-    {
-        g_pwd_fail = 0;
-        return err;
-    }
-}
-EXPORT_SYMBOL(mmc_unlock_card);
-
-int mmc_card_set_pwd(struct      mmc_pwd *pst_mmc_pwd)
-{
-    u32 err = -1;
-    u8 *ptmp;
-    
-    /* lock card without COP */
-    cmd42_data[0] = 0x01;
-    cmd42_data[1] = g_st_mmc_pwd.len;
-    if (g_st_mmc_pwd.len != 0 || g_st_mmc_pwd.ppwd != NULL)
-    {
-        memcpy(cmd42_data+2, g_st_mmc_pwd.ppwd, g_st_mmc_pwd.len);
-    }
-    else
-    {
-        return err;
-    }
-    printk(KERN_INFO "mmc_card_set_pwd(): len(pwd)=%d, pwd=%s, err=%d\n",g_st_mmc_pwd.len,g_st_mmc_pwd.ppwd,err);
-
-    ptmp = (u8 *)kmalloc(g_st_mmc_pwd.len + 2, GFP_KERNEL);
-    if (ptmp == NULL)
-    {
-        return err;
-    }
-    memcpy(ptmp, cmd42_data, g_st_mmc_pwd.len + 2);
-    ptmp[g_st_mmc_pwd.len + 2] = '\0';
- 
-    mmc_claim_host(g_hi_host->mmc);
-    err = mmc_send_cmd42(g_hi_host->mmc, g_hi_host->mmc->card, ptmp);
-    mmc_release_host(g_hi_host->mmc);
-    kfree(ptmp);   
+    printk("\033[40;32mPassword set %s. Card will be locked when hardware reset.\033[0m\n",g_st_mmc_pwd.ppwd);
 
     return err;
 }
@@ -282,71 +352,132 @@ EXPORT_SYMBOL(mmc_card_set_pwd);
 
 int mmc_card_clr_pwd(struct      mmc_pwd *pst_mmc_pwd)
 {
-    u32 err = -1;
-    u8 *ptmp;
-    
-    /* lock card without COP */
-    cmd42_data[0] = 0x02;
-    cmd42_data[1] = g_st_mmc_pwd.len;
-    if (g_st_mmc_pwd.len != 0 || g_st_mmc_pwd.ppwd != NULL)
+    int err;
+
+    user_lock_status = SD_UNLOCKED;
+    g_user_op = SD_CLEAR_PWD;
+    if (g_init_card)
     {
-        memcpy(cmd42_data+2, g_st_mmc_pwd.ppwd, g_st_mmc_pwd.len);
+        err = _mmc_card_clr_pwd(g_hi_host->mmc, g_hi_host->mmc->card, pst_mmc_pwd);
+        if (err)
+        {   
+            return err;
+        }
+        card_lock_status = SD_UNLOCKED;
+        printk(KERN_INFO "\033[40;32mPassword has cleared.\033[0m\n");
     }
     else
     {
-        return err;
+        mmc_detect_change(g_hi_host->mmc, 0);
+        
+        // TODO: here need sync with mmc_sd_init_card()
+        
     }
-    printk(KERN_INFO "mmc_card_clr_pwd(): len(pwd)=%d, pwd=%s, err=%d\n",g_st_mmc_pwd.len,g_st_mmc_pwd.ppwd,err);
+    //g_st_mmc_pwd.len = 0;
+    //g_st_mmc_pwd.ppwd = NULL;
 
-    ptmp = (u8 *)kmalloc(g_st_mmc_pwd.len + 2, GFP_KERNEL);
-    if (ptmp == NULL)
-    {
-        return err;
-    }
-    memcpy(ptmp, cmd42_data, g_st_mmc_pwd.len + 2);
-    ptmp[g_st_mmc_pwd.len + 2] = '\0';
- 
-    mmc_claim_host(g_hi_host->mmc);
-    err = mmc_send_cmd42(g_hi_host->mmc, g_hi_host->mmc->card, ptmp);
-    mmc_release_host(g_hi_host->mmc);
-    kfree(ptmp);   
-
-    return err;
+    return 0;
 }
 EXPORT_SYMBOL(mmc_card_clr_pwd);
 
-int mmc_card_fe(void)
+int mmc_lock_card(struct    mmc_pwd *pst_mmc_pwd)
 {
-    u32 err = -1;
-    u8 *ptmp;
+    int err;
     
-    /* lock card without COP */
-    cmd42_data[0] = 0x08;
-    cmd42_data[1] = g_st_mmc_pwd.len;
-    if (g_st_mmc_pwd.len != 0 || g_st_mmc_pwd.ppwd != NULL)
+    user_lock_status = SD_LOCKED;
+    err = _mmc_lock_card(g_hi_host->mmc, g_hi_host->mmc->card, pst_mmc_pwd);
+    if(err)
     {
-        memcpy(cmd42_data+2, g_st_mmc_pwd.ppwd, g_st_mmc_pwd.len);
+        return err;
+    }
+    
+    err = mmc_save_pwd(&g_st_mmc_pwd, pst_mmc_pwd);
+    if (err)
+    {
+        return err;
+    }
+
+    card_lock_status = SD_LOCKED;
+    printk(KERN_INFO "\033[40;32mCard is locked\033[0m\n");
+
+    return 0;
+}
+EXPORT_SYMBOL(mmc_lock_card);
+
+int mmc_unlock_card(struct      mmc_pwd *pst_mmc_pwd)
+{
+    int err = -1;
+    
+    user_lock_status = SD_UNLOCKED;
+    g_user_op = SD_UNLOCK_ONLY;
+    if (g_init_card && g_hi_host->mmc->card != NULL)
+    {
+        err = _mmc_unlock_card(g_hi_host->mmc, g_hi_host->mmc->card, pst_mmc_pwd);
+        if (err)
+        {
+            return err;
+        }
+
+        err = mmc_save_pwd(&g_st_mmc_pwd, pst_mmc_pwd);
+        if (err)
+        {
+            return err;
+        }
+        card_lock_status = SD_UNLOCKED;
+        printk("\033[40;32mPassword unlock success, card is unlocked.\033[0m\n");
     }
     else
     {
-        return err;
-    }
-    printk(KERN_INFO "mmc_card_fe(): len(pwd)=%d, pwd=%s, err=%d\n",g_st_mmc_pwd.len,g_st_mmc_pwd.ppwd,err);
+        err = mmc_save_tmp(&g_st_tmp_pwd, pst_mmc_pwd);
+        if (err)
+        {
+            return err;
+        }
+        mmc_detect_change(g_hi_host->mmc, 0);
+        
+        // TODO: here need sync with mmc_sd_init_card()
 
-    ptmp = (u8 *)kmalloc(g_st_mmc_pwd.len + 2, GFP_KERNEL);
-    if (ptmp == NULL)
+        err = mmc_save_pwd(&g_st_mmc_pwd, &g_st_tmp_pwd);
+        if (err)
+        {
+            return err;
+        }
+        //g_st_tmp_pwd.len = 0;
+        //g_st_tmp_pwd.ppwd = NULL;
+    }
+
+    return 0;
+}
+EXPORT_SYMBOL(mmc_unlock_card);
+
+int mmc_card_fe(void)
+{
+    int err;
+    
+    user_lock_status = SD_UNLOCKED;
+    g_user_op = SD_FORCE_ERASE;
+    if (g_init_card)
     {
-        return err;
+        err = _mmc_card_fe(g_hi_host->mmc, g_hi_host->mmc->card);
+        if(err)
+        {
+            return err;
+        }
+           
+        card_lock_status = SD_UNLOCKED;
+        printk("\033[40;32mCard has forced erased.\033[0m\n");
     }
-    memcpy(ptmp, cmd42_data, g_st_mmc_pwd.len + 2);
-    ptmp[g_st_mmc_pwd.len + 2] = '\0';
- 
-    mmc_claim_host(g_hi_host->mmc);
-    err = mmc_send_cmd42(g_hi_host->mmc, g_hi_host->mmc->card, ptmp);
-    mmc_release_host(g_hi_host->mmc);
-    kfree(ptmp);   
+    else
+    {
+        mmc_detect_change(g_hi_host->mmc, 0);
+        // TODO: here need sync with mmc_sd_init_card()
+        
+    }
+    g_user_op = SD_UNLOCK_ONLY;
+    g_st_mmc_pwd.len = 0;
+    g_st_mmc_pwd.ppwd = NULL;     
 
-    return err;
+    return 0;
 }
 EXPORT_SYMBOL(mmc_card_fe);
 

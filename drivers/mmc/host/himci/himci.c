@@ -308,12 +308,9 @@ static void hi_mci_detect_card(unsigned long arg)
 	struct himci_host *host = (struct himci_host *)arg;
     
 	unsigned int i, curr_status, status[5], detect_retry_count = 0;
-    //static int cnt;
 
 	himci_assert(host);
     g_hi_host = (struct himci_host *)arg;
-    
-    //printk("==== host:[0x%x] ========== \n", (unsigned int)g_hi_host->mmc);
     
 	while (1) {
 		for (i = 0; i < 5; i++) {
@@ -333,8 +330,6 @@ static void hi_mci_detect_card(unsigned long arg)
 		}
 	}
 	curr_status = status[0];
-    //if(++cnt%8 == 0)
-    //    printk("card_lock_status=%d, user_lock_status=%d, pwd_fail=%d\n",card_lock_status,user_lock_status,g_pwd_fail);
 	if (curr_status != host->card_status) {
 		himci_trace(2, "begin card_status = %d\n", host->card_status);
 		host->card_status = curr_status;
@@ -343,17 +338,8 @@ static void hi_mci_detect_card(unsigned long arg)
 			printk(KERN_INFO "card connected!\n");
 		} else
 			printk(KERN_INFO "card disconnected!\n");
-        g_pwd_fail = 0;
 		mmc_detect_change(host->mmc, 0);
 	}
-    else if (curr_status == 0 && host->card_status == 0 && !g_init_card &&
-            card_lock_status != user_lock_status && g_pwd_fail == 0)
-	{
-        //printk(KERN_INFO "hi_mci_detect_card():run here");
-        mmc_detect_change(host->mmc, 0);
-    }
-    //if (++cnt%10 == 0) printk(KERN_INFO "card:%d ,user:%d,fail:%d\n",card_lock_status,user_lock_status,g_pwd_fail);
-    //if (cnt == 160) cnt = 1;
 
 err:
 	mod_timer(&host->timer, jiffies + detect_time);

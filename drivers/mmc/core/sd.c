@@ -24,6 +24,8 @@
 #include "mmc_ops.h"
 #include "sd.h"
 #include "sd_ops.h"
+#include "../host/himci/hi_mci.h"
+
 
 static const unsigned int tran_exp[] = {
 	10000,		100000,		1000000,	10000000,
@@ -940,46 +942,103 @@ void mmc_sd_go_highspeed(struct mmc_card *card)
 
 unsigned char card_lock_status;
 unsigned char user_lock_status = SD_UNLOCKED;
-unsigned char g_pwd_fail = 0;
-unsigned char g_init_card = 0;
+unsigned char g_init_card = SD_INIT_FAILED;
+unsigned char g_user_op = SD_UNLOCK_ONLY;
+extern struct himci_host *g_hi_host;
+
 static int mmc_sd_check_card_lock(struct mmc_host *host, struct mmc_card *card)
 {
-    int status, lock_status, err;
+    int status, lock_status, err = -1;
 
-    //printk(KERN_INFO "mmc_sd_check_card_lock():run here");
     mmc_send_status(card, &status);
     lock_status = SD_GET_LOCK_STATUS(status);
+
     if(SD_LOCKED == lock_status) {
         card_lock_status = SD_LOCKED;
-        if (g_st_mmc_pwd.len == 0 && g_st_mmc_pwd.ppwd == NULL) {
-            printk(KERN_INFO "\033[40;32mNull password, card is locked 0x%x \033[0m\n",(u32)status);
-            g_pwd_fail = 1;
-            return status;
-        }
-        else if (SD_LOCKED == user_lock_status) {
-            printk(KERN_INFO "\033[40;32mCard is locked 0x%x \033[0m\n",(u32)status);
-            return status;
+        g_init_card = SD_INIT_FAILED;
+        printk("\033[40;32mCard is locked. \033[0m\n");
+        if (SD_UNLOCKED == user_lock_status) {
+            // when power-on/reboot with a locked card, UNLOCK/CLRPWD/FE operation need to be done here.
+            switch(g_user_op)
+            {
+                default:
+                case SD_UNLOCK_ONLY:
+                {
+                    if (0 == g_st_mmc_pwd.len || NULL == g_st_mmc_pwd.ppwd) {
+                        printk("\033[40;32mNo password.\033[0m\n");
+                        return err;
+                    }
+                    
+                    if (g_st_tmp_pwd.len != 0) {
+                        err = _mmc_unlock_card(host, card, &g_st_tmp_pwd);
+                        if (err){
+                            return err;
+                        }
+                        g_st_tmp_pwd.len = 0;
+                    }
+                    else {
+                        err = _mmc_unlock_card(host, card, &g_st_mmc_pwd);
+                    }
+                    
+                    if (err) {
+                        printk("\033[40;32mUnlock fail 0x%08x. \033[0m\n",(u32)err);
+                        return err;
+                    }
+                    else {
+                        card_lock_status = SD_UNLOCKED;
+                        g_init_card = SD_INIT_SUCCESS;
+                        err = mmc_save_pwd(&g_st_mmc_pwd, &g_st_tmp_pwd);
+                        printk("\033[40;32mCard unlock success.\033[0m\n");
+                        return err;
+                    }
+                    
+                    break;
+                }
+                case SD_CLEAR_PWD:
+                {
+                    if (0 == g_st_mmc_pwd.len || NULL == g_st_mmc_pwd.ppwd) {
+                        printk("\033[40;32mNo password.\033[0m\n");
+                        return err;
+                    }
+                    
+                    err = _mmc_card_clr_pwd(host, card, &g_st_tmp_pwd);
+                    if (err) {
+                        printk("\033[40;32mClear card password fail 0x%08x.\033[0m\n",(u32)err);
+                        return err;
+                    }
+                    else {
+                        card_lock_status = SD_UNLOCKED;
+                        g_init_card = SD_INIT_SUCCESS;
+                        printk("\033[40;32mClear card password success, card is unlocked.\033[0m\n");
+                        return err;
+                    }
+
+                    break;
+                }
+                case SD_FORCE_ERASE:
+                {
+                    err = _mmc_card_fe(host, card);
+                    if (err) {
+                        printk("\033[40;32mForce erase card fail 0x%08x.\033[0m\n",(u32)err);
+                        return err;
+                    }
+                    else {
+                        card_lock_status = SD_UNLOCKED;
+                        g_init_card = SD_INIT_SUCCESS;
+                        printk("\033[40;32mForce erase card success, card is unlocked.\033[0m\n");
+                        return err;
+                    }
+                    break;
+                }
+            }
         }
         else {
-            err = _mmc_unlock_card(host, card);
-            if (err) {
-                printk(KERN_INFO "\033[40;32mPassword unlock fail, card is locked 0x%x \033[0m\n",(u32)err);
-                g_pwd_fail = 1;
-                return err;
-            }
-            else {
-                card_lock_status = SD_UNLOCKED;
-                g_init_card = 1;
-                printk(KERN_INFO "\033[40;32mPassword unlock success, card is unlocked \033[0m\n");
-                return 0;
-            }
+            return err;
         }
-        
     }
     else {
         card_lock_status = SD_UNLOCKED;
-        g_init_card = 1;
-        printk(KERN_INFO "\033[40;32mCard is unlocked 0x%x \033[0m\n",(u32)status);
+        g_init_card = SD_INIT_SUCCESS;
         return 0;
     }
 }

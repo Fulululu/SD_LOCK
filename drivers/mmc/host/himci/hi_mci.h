@@ -18,14 +18,7 @@ extern int trace_level;
 #define CARD_UNPLUGED	1
 #define CARD_PLUGED	0
 
-extern unsigned char card_lock_status;
-extern unsigned char user_lock_status;
-extern unsigned char g_pwd_fail;
-extern unsigned char g_init_card;
 extern struct himci_host *g_hi_host;
-
-#define CARD_LOCKED     1
-#define CARD_UNLOCKED   0
 
 #define ENABLE		1
 #define DISABLE		0

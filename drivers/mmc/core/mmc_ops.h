@@ -13,16 +13,29 @@
 #define _MMC_MMC_OPS_H
 
 #define name2str(name) (#name)
-//#define MMC_LOCK_STATUS_MASK (0x03000000)
+#define MMC_LOCK_STATUS_MASK    (0x02000000)
+#define MMC_LOCK_FAILED_MASK    (0x01000000)
+#define MMC_LOCK_MASK           (MMC_LOCK_STATUS_MASK|MMC_LOCK_FAILED_MASK)
 #define MMC_LOCKED	    1
 #define MMC_UNLOCKED 	0
+
+extern unsigned char card_lock_status;
+extern unsigned char user_lock_status;
+extern unsigned char g_init_card;
+extern unsigned char g_user_op;
 
 struct mmc_pwd{
         unsigned char len;
         char *ppwd;
 };
 
-int _mmc_unlock_card(struct mmc_host *host, struct mmc_card *card);
+int _mmc_card_clr_pwd(struct mmc_host *host, struct mmc_card *card, struct mmc_pwd *pst_mmc_pwd);
+int _mmc_unlock_card(struct mmc_host *host, struct mmc_card *card, struct mmc_pwd *pst_mmc_pwd);
+int _mmc_card_fe(struct mmc_host *host, struct mmc_card *card);
+int mmc_save_pwd(struct    mmc_pwd *pdest_mmc_pwd, struct mmc_pwd *psrc_mmc_pwd);
+int mmc_card_set_pwd(struct      mmc_pwd *pst_mmc_pwd);
+int mmc_card_clr_pwd(struct      mmc_pwd *pst_mmc_pwd);
+int mmc_card_fe(void);
 int mmc_lock_card(struct      mmc_pwd *pst_mmc_pwd);
 int mmc_unlock_card(struct      mmc_pwd *pst_mmc_pwd);
 int mmc_select_card(struct mmc_card *card);
