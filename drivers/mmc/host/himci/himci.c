@@ -301,6 +301,10 @@ static void hi_mci_init_card(struct himci_host *host)
 	tmp_reg |= BURST_SIZE | RX_WMARK | TX_WMARK;
 	himci_writel(tmp_reg, host->base + MCI_FIFOTH);
 }
+struct mmc_pwd{
+        unsigned char len;
+        char *ppwd;
+};
 
 struct himci_host  *g_hi_host;
 static void hi_mci_detect_card(unsigned long arg)

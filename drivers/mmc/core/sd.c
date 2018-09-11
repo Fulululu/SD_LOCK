@@ -13,6 +13,7 @@
 #include <linux/err.h>
 #include <linux/slab.h>
 #include <linux/stat.h>
+#include <linux/completion.h>
 
 #include <linux/mmc/host.h>
 #include <linux/mmc/card.h>
@@ -940,12 +941,7 @@ void mmc_sd_go_highspeed(struct mmc_card *card)
 	mmc_set_timing(card->host, MMC_TIMING_SD_HS);
 }
 
-unsigned char card_lock_status;
-unsigned char user_lock_status = SD_UNLOCKED;
-unsigned char g_init_card = SD_INIT_FAILED;
-unsigned char g_user_op = SD_UNLOCK_ONLY;
-extern struct himci_host *g_hi_host;
-
+struct sd_lock_attr g_stlockattr = {SD_UNLOCKED,SD_INIT_FAILED,SD_UNLOCK_PWD};
 static int mmc_sd_check_card_lock(struct mmc_host *host, struct mmc_card *card)
 {
     int status, lock_status, err = -1;
@@ -954,30 +950,26 @@ static int mmc_sd_check_card_lock(struct mmc_host *host, struct mmc_card *card)
     lock_status = SD_GET_LOCK_STATUS(status);
 
     if(SD_LOCKED == lock_status) {
-        card_lock_status = SD_LOCKED;
-        g_init_card = SD_INIT_FAILED;
+        g_stlockattr.card_status = SD_LOCKED;
+        g_stlockattr.init_status = SD_INIT_FAILED;
         printk("\033[40;32mCard is locked. \033[0m\n");
-        if (SD_UNLOCKED == user_lock_status) {
+        if (SD_UNLOCKED == USER_STATUS(g_stlockattr.user_op)) {
             // when power-on/reboot with a locked card, UNLOCK/CLRPWD/FE operation need to be done here.
-            switch(g_user_op)
+            switch(g_stlockattr.user_op)
             {
                 default:
-                case SD_UNLOCK_ONLY:
+                case SD_UNLOCK_PWD:
                 {
-                    if (0 == g_st_mmc_pwd.len || NULL == g_st_mmc_pwd.ppwd) {
+                    if (g_pwd_store.temp_pwd.len != 0) {
+                        err = mmc_send_cmd42(card, g_stlockattr.user_op, &g_pwd_store.temp_pwd);
+                        complete(&mmc_lock_comp);
+                    }
+                    else if (0 == g_pwd_store.stpwd.len || NULL == g_pwd_store.stpwd.ppwd) {
                         printk("\033[40;32mNo password.\033[0m\n");
                         return err;
                     }
-                    
-                    if (g_st_tmp_pwd.len != 0) {
-                        err = _mmc_unlock_card(host, card, &g_st_tmp_pwd);
-                        if (err){
-                            return err;
-                        }
-                        g_st_tmp_pwd.len = 0;
-                    }
                     else {
-                        err = _mmc_unlock_card(host, card, &g_st_mmc_pwd);
+                        err = mmc_send_cmd42(card, g_stlockattr.user_op, &g_pwd_store.stpwd);
                     }
                     
                     if (err) {
@@ -985,60 +977,59 @@ static int mmc_sd_check_card_lock(struct mmc_host *host, struct mmc_card *card)
                         return err;
                     }
                     else {
-                        card_lock_status = SD_UNLOCKED;
-                        g_init_card = SD_INIT_SUCCESS;
-                        err = mmc_save_pwd(&g_st_mmc_pwd, &g_st_tmp_pwd);
+                        g_stlockattr.card_status = SD_UNLOCKED;
+                        g_stlockattr.init_status = SD_INIT_SUCCESS;
                         printk("\033[40;32mCard unlock success.\033[0m\n");
-                        return err;
+                        return 0;
                     }
-                    
-                    break;
                 }
                 case SD_CLEAR_PWD:
                 {
-                    if (0 == g_st_mmc_pwd.len || NULL == g_st_mmc_pwd.ppwd) {
+                    if (0 == g_pwd_store.stpwd.len || NULL == g_pwd_store.stpwd.ppwd) {
                         printk("\033[40;32mNo password.\033[0m\n");
                         return err;
                     }
                     
-                    err = _mmc_card_clr_pwd(host, card, &g_st_tmp_pwd);
+                    err = mmc_send_cmd42(card, g_stlockattr.user_op, &g_pwd_store.temp_pwd);
                     if (err) {
                         printk("\033[40;32mClear card password fail 0x%08x.\033[0m\n",(u32)err);
                         return err;
                     }
                     else {
-                        card_lock_status = SD_UNLOCKED;
-                        g_init_card = SD_INIT_SUCCESS;
-                        printk("\033[40;32mClear card password success, card is unlocked.\033[0m\n");
-                        return err;
+                        if (SD_INIT_FAILED == g_stlockattr.init_status)
+                            complete(&mmc_lock_comp);
+                        g_stlockattr.card_status = SD_UNLOCKED;
+                        g_stlockattr.init_status = SD_INIT_SUCCESS;
+                        printk("\033[40;32mClear card password success.\033[0m\n");
+                        return 0;
                     }
-
-                    break;
                 }
                 case SD_FORCE_ERASE:
                 {
-                    err = _mmc_card_fe(host, card);
+                    err = mmc_send_cmd42(card, g_stlockattr.user_op, NULL);
                     if (err) {
                         printk("\033[40;32mForce erase card fail 0x%08x.\033[0m\n",(u32)err);
                         return err;
                     }
                     else {
-                        card_lock_status = SD_UNLOCKED;
-                        g_init_card = SD_INIT_SUCCESS;
-                        printk("\033[40;32mForce erase card success, card is unlocked.\033[0m\n");
-                        return err;
+                        if (SD_INIT_FAILED == g_stlockattr.init_status)
+                            complete(&mmc_lock_comp);
+                        g_stlockattr.card_status = SD_UNLOCKED;
+                        g_stlockattr.init_status = SD_INIT_SUCCESS;
+                        printk("\033[40;32mForce erase card success.\033[0m\n");
+                        mmc_detect_change(g_hi_host->mmc, 0);
+                        return 0;
                     }
-                    break;
                 }
             }
         }
         else {
-            return err;
+            return 0;
         }
     }
     else {
-        card_lock_status = SD_UNLOCKED;
-        g_init_card = SD_INIT_SUCCESS;
+        g_stlockattr.card_status = SD_UNLOCKED;
+        g_stlockattr.init_status = SD_INIT_SUCCESS;
         return 0;
     }
 }

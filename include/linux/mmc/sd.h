@@ -103,12 +103,27 @@
 #define SD_INIT_FAILED  0
 #define SD_INIT_SUCCESS 1
 
-#define SD_UNLOCK_ONLY  0
-#define SD_CLEAR_PWD    1
-#define SD_FORCE_ERASE  2
+/*
+ * SD LOCK operation(corresponding to register locate)
+ */ 
+#define SD_SET_PWD      0x01
+#define SD_CLEAR_PWD    0x02
+#define SD_LOCK_PWD     0x04
+#define SD_UNLOCK_PWD   0x00
+#define SD_FORCE_ERASE  0x08
+/*
+ * SD LOCK operation(corresponding to none)
+ */ 
+#define SD_GET_STATUS   0x03   
 
+struct sd_lock_attr {
+    unsigned char card_status;
+    unsigned char init_status;
+    unsigned char user_op;
+};
+#define USER_STATUS(x) ((x & (SD_UNLOCK_PWD|SD_CLEAR_PWD|SD_FORCE_ERASE))> 0? 0: 1)
 
-extern struct mmc_pwd g_st_mmc_pwd;
-extern struct mmc_pwd g_st_tmp_pwd;
+extern struct mmc_pwd_admin g_pwd_store;
+extern struct completion mmc_lock_comp;
 
 #endif /* LINUX_MMC_SD_H */
